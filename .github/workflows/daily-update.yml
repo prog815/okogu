@@ -2,19 +2,16 @@ name: Daily OKOGU Update
 
 on:
   schedule:
-    - cron: '0 15 * * *'      # 15:00 UTC = 18:00 МСК (разнесено с ОКВЭД2 05:00 / ОКПД2 11:30 / ОКТМО 12:00 / ОКЕИ 13:00 / ОКАТО 14:00)
-  workflow_dispatch:          # ручной запуск
+    - cron: '0 15 * * *'      # 18:00 МСК, разнесено с остальными
+  workflow_dispatch:
 
 jobs:
   sync-and-trigger:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write         # встроенный токен Actions для коммита
+      contents: write
     env:
-      # API-токен Kaggle НОВОГО образца (CLI >= 1.8.0).
-      # В репозитории секрет называется KAGGLE_API_TOKEN_OKOGU, внутри него чистый токен.
-      # Kaggle CLI читает переменную окружения KAGGLE_API_TOKEN напрямую.
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN_OKOGU }}
 
     steps:
@@ -23,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Kaggle CLI с поддержкой API-токенов (>= 1.8.0)
+      - name: Install Kaggle CLI (>= 1.8.0)
         run: |
           pip install -q --upgrade kaggle
           kaggle --version
@@ -42,41 +39,81 @@ jobs:
           kaggle kernels output eavprog/okogu-classifier-downloader -p ./output
           echo "Содержимое output:"
           find ./output -maxdepth 4 -type f | head -30
-          echo ""
-          echo "--- Попытка показать лог/диагностику тетрадки (если есть) ---"
-          for f in ./output/*.log ./output/*.txt ./output/__notebook*.ipynb; do
-            [ -f "$f" ] && { echo ">>> $f (last 50 lines) >>>"; tail -n 50 "$f"; echo "<<< $f <<<"; echo ""; }
-          done || true
 
-      - name: Copy web files to repo root (не падает, ставит флаг)
+      - name: Detect SRC and copy web files
         id: copy
         run: |
-          # ВАЖНО: тетрадка ОКОГУ пишет публикуемые артефакты В ПОДПАПКУ okogu_data/web
-          # (как ОКАТО/ОКТМО), а НЕ в корень /kaggle/working (как ОКЕИ).
-          # Поэтому SRC = ./output/okogu_data/web, а НЕ ./output.
-          # Это ровно те грабли, на которые наткнулся ОКЕИ v1.2, когда путь SRC
-          # скопировали из ОКТМО/ОКЕИ без адаптации и получили 4× MISSING.
-          SRC=./output/okogu_data/web
+          # Авто-детект: ОКОГУ пишет в подпапку okogu_data/web, не в корень.
+          # Голый ./output запрещён (грабли ОКЕИ v1.2 → 4× MISSING).
+          SRC=""
+          for candidate in ./output/okogu_data/web ./output/web; do
+            if [ -f "$candidate/okogu.json" ]; then
+              SRC="$candidate"
+              break
+            fi
+          done
+          if [ -z "$SRC" ]; then
+            echo "::error::Не найден каталог с okogu.json (проверяли ./output/okogu_data/web и ./output/web)"
+            echo "FILES_OK=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "SRC=$SRC"
           MISSING=0
           for f in okogu.json okogu.json.gz okogu_meta.json okogu_meta.json.gz; do
             if [ -f "$SRC/$f" ]; then
               cp "$SRC/$f" "./$f"
               echo "copied $f"
             else
-              echo "::warning::MISSING $f в $SRC (тетрадка, вероятно, упала или писала не туда)"
+              echo "::warning::MISSING $f в $SRC"
               MISSING=$((MISSING+1))
             fi
           done
           if [ "$MISSING" -gt 0 ]; then
-            echo "❌ Отсутствует $MISSING из 4 файлов — коммит пропущен, сайт остаётся на последней хорошей версии"
+            echo "❌ Отсутствует $MISSING из 4 файлов — коммит пропущен"
             echo "FILES_OK=false" >> "$GITHUB_ENV"
           else
             echo "✅ Все 4 файла на месте"
             echo "FILES_OK=true" >> "$GITHUB_ENV"
           fi
 
-      - name: Commit and push changes
+      - name: Check metadata (META_OK)
         if: env.FILES_OK == 'true'
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+          with open("okogu_meta.json", encoding="utf-8") as f:
+              m = json.load(f)
+          errors = []
+          if m.get("publish_allowed") is not True:
+              errors.append(f"publish_allowed={m.get('publish_allowed')!r} (нужно True)")
+          if m.get("critical_errors"):
+              errors.append(f"critical_errors={m.get('critical_errors')!r} (нужно [])")
+          dh = m.get("data_hash") or ""
+          dhf = m.get("data_hash_full") or ""
+          if len(dh) != 16:
+              errors.append(f"data_hash должен быть 16 hex, получено {len(dh)}")
+          if len(dhf) != 64:
+              errors.append(f"data_hash_full должен быть 64 hex, получено {len(dhf)}")
+          if dhf[:16] != dh:
+              errors.append("data_hash != data_hash_full[:16]")
+          env_path = os.environ["GITHUB_ENV"]
+          if errors:
+              print("❌ Мета не прошла проверку:", file=sys.stderr)
+              for e in errors:
+                  print(f"  - {e}", file=sys.stderr)
+              with open(env_path, "a", encoding="utf-8") as f:
+                  f.write("META_OK=false\n")
+              sys.exit(0)  # job не валим — сайт останется на старой версии
+          print("✅ Мета в порядке")
+          print(f"   records_count={m.get('records_count')}, sections={m.get('sections_count')}")
+          print(f"   change_display={m.get('change_display')!r}")
+          print(f"   data_hash={dh}, data_hash_full={dhf[:16]}...")
+          with open(env_path, "a", encoding="utf-8") as f:
+              f.write("META_OK=true\n")
+          EOF
+
+      - name: Commit and push
+        if: env.FILES_OK == 'true' && env.META_OK == 'true'
         run: |
           git config --local user.email "github-actions@github.com"
           git config --local user.name "GitHub Actions"
@@ -84,10 +121,10 @@ jobs:
           if git diff --cached --quiet; then
             echo "✅ Изменений нет — данные уже актуальны"
           else
-            SOURCE_DATE=$(python -c "import json;print(json.load(open('okogu_meta.json')).get('source_date','?'))")
-            git commit -m "Auto-update: OKOGU data from kernel output (source $SOURCE_DATE) [skip ci]"
+            SOURCE_DATE=$(python -c "import json;m=json.load(open('okogu_meta.json'));print(m.get('source_date') or m.get('effective_date') or m.get('prepared_date') or m.get('generated_at') or '?')")
+            git commit -m "Auto-update: OKOGU data (source ${SOURCE_DATE}) [skip ci]"
             git push
-            echo "✅ Изменения запушены"
+            echo "✅ Запушено (source ${SOURCE_DATE})"
           fi
 
       - name: Trigger new notebook run (fire-and-forget, всегда)
