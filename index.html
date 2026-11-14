@@ -507,37 +507,29 @@
   }
 
   function populateSections() {
-    var list = [];
-    if (META && Array.isArray(META.sections) && META.sections.length) {
-      list = META.sections.map(function(s){
-        // Нормализация: если пришел root: "10", приводим к section: "1" (грабли ОКФС)
-        var val = String(s.section || s.root || '');
-        if (val.length > 1 && /^\d+$/.test(val)) {
-          val = val.charAt(0);
-        }
-        var def = DEFAULT_SECTIONS[val] || { short: 'Раздел ' + val, full: 'Раздел ' + val };
-        return {
-          sec: val,
-          name: s.name || def.full,
-          count: typeof s.count === 'number' ? s.count : null
-        };
-      });
-    } else {
-      list = Object.keys(DEFAULT_SECTIONS).map(function(k){
-        return { sec: k, name: DEFAULT_SECTIONS[k].full, count: null };
-      });
-    }
+    // Собираем разделы прямо из данных, чтобы не зависеть от структуры meta.sections
+    var counts = {};
+    DATA.forEach(function(r) {
+      if (r.sec) counts[r.sec] = (counts[r.sec] || 0) + 1;
+    });
+
+    var keys = Object.keys(DEFAULT_SECTIONS).sort();
+    // Если в данных есть разделы, не указанные в DEFAULT_SECTIONS, добавим их
+    Object.keys(counts).forEach(function(k) {
+      if (keys.indexOf(k) === -1) keys.push(k);
+    });
 
     var currentVal = els.sec.value;
     while (els.sec.options.length > 1) {
       els.sec.remove(1);
     }
-    list.forEach(function(s){
+    keys.forEach(function(k){
+      var def = DEFAULT_SECTIONS[k] || { short: 'Раздел ' + k, full: 'Раздел ' + k };
       var opt = document.createElement('option');
-      opt.value = s.sec;
-      var shortName = s.name.length > 40 ? s.name.substring(0, 37) + "…" : s.name;
-      opt.textContent = s.sec + " — " + shortName + (s.count != null ? " (" + s.count + ")" : "");
-      opt.title = s.name;
+      opt.value = k;
+      var shortName = def.full.length > 40 ? def.full.substring(0, 37) + "…" : def.full;
+      opt.textContent = k + " — " + shortName + (counts[k] != null ? " (" + counts[k] + ")" : "");
+      opt.title = def.full;
       els.sec.appendChild(opt);
     });
     if (currentVal) els.sec.value = currentVal;
@@ -814,7 +806,6 @@
     var s3 = DATA.filter(function(x){ return x.sec === '3'; }).length;
     
     if (s1 === 0 && s2 === 0 && s3 === 0) {
-        // Fallback если данные еще не загружены
         els.footstats.innerHTML = 'В справочнике <b>' + fmt(total) + '</b> записей.';
     } else {
         els.footstats.innerHTML = 'В справочнике <b>' + fmt(total) + '</b> записей: гос. власть — <b>' + fmt(s1) + '</b>, МСУ — <b>' + fmt(s2) + '</b>, организации — <b>' + fmt(s3) + '</b>.';
